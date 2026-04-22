@@ -75,9 +75,9 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 |-----|-------|--------|
 | 2 | `uv` env + smoke test (one LLM call on one fake note) | ✅ done |
 | 3 | Synthetic data generator (10 notes + gold JSON) | ✅ done |
-| 4 | Pydantic schema → `src/meditab/schema.py`, validators, parse all 10 golds | pending |
-| 5 | `LLMClient` adapter + zero-shot extraction prompt + structured output | pending |
-| 6 | Local Mongo (Docker) + ingestion script | pending |
+| 4 | Pydantic schema → `src/meditab/schema.py`, validators, parse all 10 golds | ✅ done |
+| 5 | `LLMClient` adapter + zero-shot extraction prompt + structured output | ✅ done |
+| 6 | Local Mongo (Docker) + ingestion script | ✅ done |
 | 7 | MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`) | pending |
 | 8 | Refactor extraction to go through MCP | pending |
 | 9 | Batch extraction loop + structured logging | pending |
@@ -90,8 +90,8 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 ## Status
 
 **Current week:** 1
-**Last completed day:** 3 (2026-04-21) — env + smoke test + synthetic generator
-**Next:** Day 4 — refine Pydantic schema, move to `src/meditab/schema.py`, validate all 10 golds
+**Last completed day:** 6 (2026-04-22) — local Mongo + idempotent ingestion, 10 notes + 10 golds live
+**Next:** Day 7 — MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`)
 
 ### Carry-over (from Day 1, still outstanding)
 
@@ -141,6 +141,45 @@ These are non-code blockers. Day 4+ proceed regardless, but the emails must go o
 **Observed caveat (for the thesis methodology chapter):**
 Because the same LLM generates both the note and the gold for synthetic patients, extraction accuracy on this set will be inflated vs real data. This is acceptable for pipeline dev — real eval comes from the clinician-annotated gold set at the hospital.
 
+#### Day 4 — 2026-04-22 — done
+- [x] [src/meditab/schema.py](src/meditab/schema.py) — `AdverseEffect`, `DrugEntry`, `PatientExtraction` with `Field(description=...)` and validators
+- [x] Switched `data_inici` / `data_fi` from `str` to `datetime.date` (free ISO-8601 validation)
+- [x] Field validators: `_normalize_farmac` (lowercase + strip + non-empty), `_check_dose_positive`
+- [x] Model validators: `_check_dose_order`, `_check_date_order`, `_check_ongoing_consistency`, `_check_duration_consistency` (±1 month tolerance), `_check_dose_unit_consistency`, `_check_unique_drugs`
+- [x] [scripts/day04_validate_golds.py](scripts/day04_validate_golds.py) — loads all 10 golds and reports pass/fail
+- [x] Day 3 generator refactored to import from `meditab.schema` (single source of truth)
+- [x] Day 3 prompt tightened on `dosi_notes` (was misused by Gemini for "escalada gradual" narrative)
+- [x] Fixed `data/synthetic/gold/synthetic_004.json` (`dosi_notes` null, since dose is in mg)
+- [x] Final result: **10/10 golds pass validation**
+
+**Finding worth noting:** The original generator prompt said `dosi_notes: null excepte si la dosi està en unitats no-mg`, but Gemini still filled it with "escalada gradual" narrative when it saw dose escalation. Root cause: prompt didn't say "SEMPRE null if mg/dia, INCLÚS if there's a range or escalation". This is a useful example for the thesis methodology chapter — schema violations aren't just about typing, they're about prompt ambiguity too.
+
+**Known limitation (documented, not fixed):** `_check_duration_consistency` only fires when both `data_inici` and `data_fi` are set. An ongoing drug with `durada_mesos: 3` that started 3 years ago will pass silently. Decision: leave this as-is — real clinicians write approximate durations, and we don't want to reject their annotations.
+
+#### Day 5 — 2026-04-22 — done
+- [x] [src/meditab/llm_client.py](src/meditab/llm_client.py) — `LLMClient` Protocol + `GeminiExtractor` implementation
+- [x] Zero-shot Catalan extraction prompt (rules mirror `docs/annotation_schema.md`)
+- [x] Gemini `response_schema=PatientExtraction` — validators enforced at parse time
+- [x] [scripts/day05_zero_shot_extract.py](scripts/day05_zero_shot_extract.py) — extract one note + diff vs gold
+- [x] End-to-end verified on `synthetic_001`: extraction succeeds, diff runs, all validators pass
+
+**Finding (important for the thesis):** Running the diff on `synthetic_001` flagged 4 differences. **Two were gold-quality bugs, not extraction bugs** — the gold had `dosi_min_mg_dia: 50` when the note showed dose escalation 25→50, and `durada_mesos: 1` when the schema says it must be null if `data_fi` is null. The other two were style differences (`categoria` specificity, `resposta_clinica` length).
+
+Decision: **do NOT fix synthetic golds.** They are scratch data for pipeline dev; real eval comes from clinician-annotated gold at the hospital. Prompt tuning against noisy synthetic golds would overfit to gold quirks rather than the real task. Filed under "Week 5 error analysis pitfalls to warn about in the thesis".
+
+#### Day 6 — 2026-04-22 — done
+- [x] [docker-compose.yml](docker-compose.yml) — single-service Mongo 7, named volume, port 27017
+- [x] [src/meditab/mongo.py](src/meditab/mongo.py) — `get_db()` reads `MONGO_URI` env var (defaults to localhost); `DB_NAME = "meditab"`
+- [x] [scripts/day06_ingest.py](scripts/day06_ingest.py) — idempotent upsert by `_id = patient_id`; validates every gold through `PatientExtraction` before insert
+- [x] Added `pymongo` dependency (via `uv add`)
+- [x] Collections live: `raw_notes` (10 docs), `gold_extractions` (10 docs, 16 drug entries)
+- [x] Dates serialized with `mode="json"` (ISO strings, not BSON dates — simpler for MCP responses later)
+
+**Operational notes:**
+- `docker compose up -d` at repo root starts Mongo; data persists in `meditab-mongo-data` volume across restarts.
+- `docker compose down -v` wipes data (use before regenerating synthetic set).
+- No auth configured — local dev only. Hospital Mongo will have its own auth; our `MONGO_URI` env var will carry the credentials.
+
 ---
 
 ## Operational model (clarified 2026-04-21)
@@ -182,14 +221,24 @@ Whenever you start a new session:
 3. Look at **Carry-over** and **Open blockers** — have the hospital/tutor emails gone out? Has anything unblocked?
 4. Tell Claude: "Resuming Meditab, Day 4. [Did I send the emails? Y/N] [Anything new to report?]"
 
-### Day 4 at a glance (what's coming next)
+### Day 7 at a glance (what's coming next)
 
-Move the provisional Pydantic models from `scripts/day03_generate_synthetic.py` into `src/meditab/schema.py`, then refine against [docs/annotation_schema.md](docs/annotation_schema.md):
+Build MCP server v0 exposing four tools over stdio (Anthropic `mcp` Python SDK):
 
-- Add `Field(description=...)` to every field (becomes interview-ready docstrings).
-- Add validators: `dosi_min_mg_dia <= dosi_max_mg_dia`, `data_inici <= data_fi`, `motiu_discontinuacio` null iff `is_ongoing=true`, `durada_mesos` consistent with dates.
-- Write a validation script that loads all 10 generated golds and reports which ones fail — those failures are the real edge cases.
-- This is a **learning** day: user writes, Claude reviews.
+- `list_patients()` — returns `[patient_id, ...]` from `raw_notes`.
+- `get_patient(patient_id)` — returns the raw note text.
+- `get_gold(patient_id)` — returns the gold `PatientExtraction`.
+- `store_extraction(patient_id, model, extraction)` — writes to a new `llm_extractions` collection, tagged with model + timestamp (prep for Day 9 batch runs).
+
+Per the Day 1 decision log, we're building **Pattern B** (Python acts as MCP client; LLM doesn't see tools). Pattern A can be layered on later if the hospital requires it.
+
+New files:
+- `src/meditab/mcp_server.py` — FastMCP server, four `@mcp.tool()` decorated functions.
+- `scripts/day07_mcp_smoke.py` — a Python MCP *client* that connects via stdio, calls each tool, prints results. This is how we prove Pattern B works end-to-end.
+
+**Learning angle:** what MCP actually is (a JSON-RPC transport + tool-discovery protocol), and why the adapter pattern here (LLM-agnostic tools) lets us keep experimental complexity separate from production complexity.
+
+**Prereq:** add `mcp` to dependencies (`uv add mcp`).
 
 ---
 

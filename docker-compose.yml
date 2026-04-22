@@ -1,0 +1,23 @@
+# Local MongoDB for Meditab dev. Hospital machine will use its own Mongo
+# instance (different URI), so this file is laptop-only.
+#
+# Usage:
+#   docker compose up -d        # start Mongo in the background
+#   docker compose down         # stop (data persists in the named volume)
+#   docker compose down -v      # stop + wipe data
+#
+# No auth — local-only, port 27017 bound to localhost implicitly via Docker
+# Desktop's default network. Not fit for production; this is dev convenience.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: meditab-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - meditab-mongo-data:/data/db
+    restart: unless-stopped
+
+volumes:
+  meditab-mongo-data:

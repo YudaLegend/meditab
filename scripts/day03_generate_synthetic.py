@@ -17,44 +17,16 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Literal
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
+from meditab.schema import PatientExtraction
+
 sys.stdout.reconfigure(encoding="utf-8")
 load_dotenv()
-
-
-# ---------- Provisional schema (Day 4: move to src/meditab/schema.py) ----------
-
-
-class AdverseEffect(BaseModel):
-    descripcio: str
-    persistent: Literal["persistent", "no persistent"] | None = None
-    severitat: Literal["lleu", "moderada", "greu"] | None = None
-
-
-class DrugEntry(BaseModel):
-    farmac: str
-    categoria: str
-    dosi_min_mg_dia: float | None = None
-    dosi_max_mg_dia: float | None = None
-    dosi_notes: str | None = None
-    data_inici: str | None = None
-    data_fi: str | None = None
-    is_ongoing: bool
-    durada_mesos: int | None = None
-    resposta_clinica: str | None = None
-    efectes_adversos: list[AdverseEffect]
-    motiu_discontinuacio: str | None = None
-
-
-class PatientExtraction(BaseModel):
-    patient_id: str
-    drugs: list[DrugEntry]
 
 
 class SyntheticPatient(BaseModel):
@@ -99,7 +71,7 @@ Requeriments:
    - `is_ongoing`: true si el tractament continua a l'última visita.
    - `motiu_discontinuacio`: null si `is_ongoing = true`.
    - `durada_mesos`: enter si tens dates completes; null altrament.
-   - `dosi_notes`: null excepte si la dosi està en unitats no-mg (mg/kg, gotes, etc.).
+   - `dosi_notes`: SEMPRE null si la dosi és en mg/dia (inclús si hi ha escalada, rang, o canvis de dosi — això ja es captura amb `dosi_min_mg_dia` i `dosi_max_mg_dia`). Només s'omple si la unitat NO és mg (mg/kg, UI, gotes, etc.).
 
 IMPORTANT: el gold HA de reflectir exactament el que diu la nota.
 """
