@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import uuid
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -39,6 +40,12 @@ def _unwrap_text(result) -> str:
     grab .text off the first block."""
     return result.content[0].text
 
+def _unwrap_list(result) -> list[str]:
+    """FastMCP splits list-typed returns into one text block per element.
+    Collect them back into a Python list."""
+    return [block.text for block in result.content]
+
+
 
 async def run_smoke() -> int:
     async with stdio_client(SERVER_PARAMS) as (read, write):
@@ -59,13 +66,25 @@ async def run_smoke() -> int:
             #   - assert it's a non-empty list of strings
             #   - pick pids[0] as `sample_id` to reuse below
             #   - print "list_patients OK — N patients"
-            raise NotImplementedError("TODO(day7): call list_patients")
+            result = await session.call_tool("list_patients", {})
+            patients = _unwrap_list(result)
+            assert patients and all(isinstance(p, str) for p in patients)
+            sample_id = patients[0]
+            print(f"list_patients OK — {len(patients)} patients")
+
+
 
             # --- get_patient ---
             # TODO(day7):
             #   - call session.call_tool("get_patient", {"patient_id": sample_id})
             #   - _unwrap_text → string; assert len > 0
             #   - print "get_patient OK — N chars"
+
+            result = await session.call_tool("get_patient", {"patient_id":sample_id})
+            text = _unwrap_text(result)
+            assert len(text) > 0
+            print(f"get_patient OK — {len(text)} chars")
+
 
             # --- get_gold ---
             # TODO(day7):
@@ -74,6 +93,11 @@ async def run_smoke() -> int:
             #   - assert gold["patient_id"] == sample_id
             #   - assert "drugs" in gold
             #   - print "get_gold OK — N drugs"
+            result = await session.call_tool("get_gold", {"patient_id": sample_id})
+            gold = json.loads(_unwrap_text(result))
+            assert gold["patient_id"] == sample_id
+            assert "drugs" in gold
+            print(f"get_gold OK — {len(gold['drugs'])} drugs")
 
             # --- store_extraction ---
             # TODO(day7):
@@ -87,6 +111,19 @@ async def run_smoke() -> int:
             #     })
             #   - json.loads the ack; assert ack["ok"] is True
             #   - print "store_extraction OK — run_at=..."
+            
+            result = await session.call_tool("store_extraction", {
+                "patient_id": sample_id,
+                "model": "smoke-test",
+                "prompt_strategy": "zero-shot",
+                "prompt_version": "v1",
+                "run_id": "smoke-" + uuid.uuid4().hex[:8],  # add: import uuid
+                "extraction": gold,
+            })
+
+            ack = json.loads(_unwrap_text(result))
+            assert ack["ok"] is True
+            print(f"store_extraction OK — run_at={ack['run_at']}")
 
             print("\nALL TOOLS OK")
     return 0

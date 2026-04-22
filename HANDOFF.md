@@ -78,8 +78,8 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 | 4 | Pydantic schema → `src/meditab/schema.py`, validators, parse all 10 golds | ✅ done |
 | 5 | `LLMClient` adapter + zero-shot extraction prompt + structured output | ✅ done |
 | 6 | Local Mongo (Docker) + ingestion script | ✅ done |
-| 7 | MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`) | pending |
-| 8 | Refactor extraction to go through MCP | pending |
+| 7 | MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`) | ✅ done |
+| 8 | Refactor extraction to go through MCP | ✅ done |
 | 9 | Batch extraction loop + structured logging | pending |
 | 10 | Eval harness (per-field partial-match F1) | pending |
 | 11 | Error analysis v0 | pending |
@@ -90,8 +90,8 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 ## Status
 
 **Current week:** 1
-**Last completed day:** 6 (2026-04-22) — local Mongo + idempotent ingestion, 10 notes + 10 golds live
-**Next:** Day 7 — MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`)
+**Last completed day:** 8 (2026-04-22) — end-to-end extraction through MCP, run metadata + prompt registry + provider factory in place, retry on transient Gemini errors
+**Next:** Day 9 — batch extraction loop across all 10 patients + structured logging + unique `(run_id, patient_id)` index on `llm_extractions`
 
 ### Carry-over (from Day 1, still outstanding)
 
@@ -180,6 +180,35 @@ Decision: **do NOT fix synthetic golds.** They are scratch data for pipeline dev
 - `docker compose down -v` wipes data (use before regenerating synthetic set).
 - No auth configured — local dev only. Hospital Mongo will have its own auth; our `MONGO_URI` env var will carry the credentials.
 
+#### Day 7 — 2026-04-22 — done
+- [x] `uv add mcp` (→ `mcp==1.27.0`, + `starlette`/`uvicorn`/`sse-starlette`/`pydantic-settings` transitives)
+- [x] [src/meditab/mcp_server.py](src/meditab/mcp_server.py) — FastMCP server with four `@mcp.tool()` functions (`list_patients`, `get_patient`, `get_gold`, `store_extraction`)
+- [x] `store_extraction` validates the incoming dict through `PatientExtraction` before inserting — fail-loud rather than corrupt the collection
+- [x] Writes land in a new `llm_extractions` collection, one doc per `(patient_id, model, run_at)` — no dedup by design (Day 9 wants run history)
+- [x] [scripts/day07_mcp_smoke.py](scripts/day07_mcp_smoke.py) — async MCP client via `stdio_client`, spawns server as `uv run python -m meditab.mcp_server`, calls each tool, asserts shape
+- [x] Smoke run green end-to-end: `list_patients OK — 10 / get_patient OK — 1069 chars / get_gold OK — 1 drugs / store_extraction OK — run_at=2026-04-22T17:26:54Z`
+
+**Finding (FastMCP content-block quirk, worth remembering for Day 8):** FastMCP splits a `list[str]` return into *one `TextContent` block per element*, not one block containing a JSON array. Tools returning `dict` or `str` still produce a single block. Day 7 client had to add `_unwrap_list()` alongside `_unwrap_text()` for this reason. Rule of thumb baked into the smoke test: `dict`/`str` returns → `_unwrap_text` (+ optional `json.loads`); `list[X]` returns → `_unwrap_list` (one `.text` per element).
+
+#### Day 8 — 2026-04-22 — done
+- [x] **Run metadata scheme** — `store_extraction` now takes `model`, `prompt_strategy`, `prompt_version`, `run_id` alongside `extraction`. `llm_extractions` docs are fully queryable for Week 4 sweeps (one model, N strategies, M versions).
+- [x] **Prompt registry** — `llm_client.PROMPTS: dict[(strategy, version), str]` replaces the single `EXTRACTION_PROMPT` constant. Adding few-shot / CoT in Week 4 = adding a dict entry, no extractor changes.
+- [x] **Provider factory** — `make_extractor()` reads `MEDITAB_LLM_PROVIDER` (laptop: `gemini`, hospital: `bedrock` once `BedrockExtractor` lands in Week 3). Scripts never name a vendor.
+- [x] **Transient-error retry** — `GeminiExtractor.extract` retries on 429/500/503 with linear backoff (5s × attempt, 3 attempts max). Triggered for real on the first Day 8 run (Gemini was 503ing); retry handled it on attempt 2.
+- [x] [scripts/day08_mcp_extract.py](scripts/day08_mcp_extract.py) — end-to-end via MCP: `get_patient` → `extract` → `store_extraction` → optional `get_gold` diff. No disk I/O in the data path.
+- [x] **Hospital-readiness:** gold fetch is wrapped in try/except, so the same script works on real hospital data where golds don't exist yet (diff is just skipped).
+- [x] [scripts/day05_zero_shot_extract.py](scripts/day05_zero_shot_extract.py) updated to pass the new `strategy`/`version` args — kept as a disk-based smoke path for comparison.
+- [x] [scripts/day07_mcp_smoke.py](scripts/day07_mcp_smoke.py) updated to pass the new metadata args to `store_extraction`; still green.
+- [x] End-to-end run on `synthetic_001` succeeded: note fetched (1069 chars), gold fetched (1 drug), extraction stored under `run_id=2e2abd45...`, 4 diffs surfaced.
+
+**Finding (same class as Day 5, now with more evidence):** The 4 diffs on `synthetic_001` are the same gold-quality / prompt-style split: gold says `dosi_min=50` when the note shows escalation `25→50` (the extractor got it right at `25`); gold uses terse `categoria='antidepressiu'` vs extractor's more specific `'Antidepressiu (ISRS)'`; gold's `resposta_clinica='bona'` is a one-word summary vs the extractor's sentence-level paraphrase. This confirms the Day 5 decision **not** to prompt-tune against synthetic golds — we'd be overfitting to gold-generation quirks, not to the real task. The four diff lines are on the list of "error-analysis pitfalls to warn about in the thesis."
+
+**Hospital-day diff footprint (with Day 8 design in place):**
+1. `.env`: `GEMINI_API_KEY` → AWS creds; `MONGO_URI` → hospital Mongo; `MEDITAB_LLM_PROVIDER=bedrock`.
+2. Add `BedrockExtractor` class in `src/meditab/llm_client.py` (~30 lines, mirrors `GeminiExtractor`).
+3. Change `notes_dir` in `scripts/day06_ingest.py` to the real data path; drop the gold-ingestion block (no golds yet).
+4. Everything else (`schema.py`, `mongo.py`, `mcp_server.py`, Day 7–10 scripts) is untouched.
+
 ---
 
 ## Operational model (clarified 2026-04-21)
@@ -217,28 +246,24 @@ Pipeline is already being built on **synthetic Catalan clinical text** (primary 
 Whenever you start a new session:
 
 1. Read this HANDOFF.
-2. Check the **Status** section — you are resuming on **Day 4** (Pydantic schema refinement).
+2. Check the **Status** section — you are resuming on **Day 9** (batch extraction loop + structured logging).
 3. Look at **Carry-over** and **Open blockers** — have the hospital/tutor emails gone out? Has anything unblocked?
-4. Tell Claude: "Resuming Meditab, Day 4. [Did I send the emails? Y/N] [Anything new to report?]"
+4. Tell Claude: "Resuming Meditab, Day 9. [Did I send the emails? Y/N] [Anything new to report?]"
 
-### Day 7 at a glance (what's coming next)
+### Day 9 at a glance (what's coming next)
 
-Build MCP server v0 exposing four tools over stdio (Anthropic `mcp` Python SDK):
+Scale the Day 8 one-patient loop to all 10 synthetic patients. The whole point of the Day 8 metadata scheme is to make this trivial — a `for pid in await list_patients(...)` around the same extract-and-store block.
 
-- `list_patients()` — returns `[patient_id, ...]` from `raw_notes`.
-- `get_patient(patient_id)` — returns the raw note text.
-- `get_gold(patient_id)` — returns the gold `PatientExtraction`.
-- `store_extraction(patient_id, model, extraction)` — writes to a new `llm_extractions` collection, tagged with model + timestamp (prep for Day 9 batch runs).
+New file:
+- `scripts/day09_batch_extract.py` — iterates all patients, one `run_id` per invocation, structured JSONL log per patient (pid, status, elapsed_ms, n_drugs, error_msg).
 
-Per the Day 1 decision log, we're building **Pattern B** (Python acts as MCP client; LLM doesn't see tools). Pattern A can be layered on later if the hospital requires it.
+Mongo change:
+- Add a **unique** index on `llm_extractions.(run_id, patient_id)` so retries within a batch *upsert* instead of accumulate. Switch `store_extraction` from `insert_one` to `update_one({...}, {"$set": doc}, upsert=True)`. This is the one-line toggle we deferred from Day 7.
 
-New files:
-- `src/meditab/mcp_server.py` — FastMCP server, four `@mcp.tool()` decorated functions.
-- `scripts/day07_mcp_smoke.py` — a Python MCP *client* that connects via stdio, calls each tool, prints results. This is how we prove Pattern B works end-to-end.
+Resilience:
+- If a single patient's extraction raises (LLM final-failure after all retries, or validator error), the batch should log, mark that patient failed, and continue. One bad apple must not kill the run.
 
-**Learning angle:** what MCP actually is (a JSON-RPC transport + tool-discovery protocol), and why the adapter pattern here (LLM-agnostic tools) lets us keep experimental complexity separate from production complexity.
-
-**Prereq:** add `mcp` to dependencies (`uv add mcp`).
+**Learning angle:** Day 9 is where "pipeline" stops being a diagram and starts being a loop with per-item success/failure accounting. The JSONL log is the first input to Day 10's eval harness.
 
 ---
 
@@ -259,3 +284,7 @@ New files:
 - **2026-04-21** — Synthetic dev set = 10 patients, 10 diverse scenarios, one LLM call produces note + gold together. Rationale: consistency guaranteed (no drift between note and gold); small enough to iterate fast; caveat is that extraction accuracy on this set will be inflated vs real clinician-annotated data.
 - **2026-04-21** — MCP integration will be **Pattern B** (Python acts as MCP client, LLM does not see MCP tools). Pattern A (LLM-as-agent invoking tools) can be layered on top later if the hospital requires it. Rationale: Pattern B lets us measure extraction quality in isolation and is faster to build; Pattern A is strictly additive. Confirmation pending in hospital email.
 - **2026-04-21** — Python 3.12 (not the originally planned 3.11). Rationale: uv selected it based on system availability; no incompatibilities; fighting the default is churn for no benefit.
+- **2026-04-22** — Run-level metadata scheme: every `llm_extractions` row carries `(model, prompt_strategy, prompt_version, run_id, run_at)` in addition to the extraction payload. Rationale: Week 4 sweeps will cross N models × M prompting strategies × K prompt revisions; without these four keys there's no way to group or compare runs after the fact. `run_id` is regenerated per batch invocation; `prompt_version` is bumped manually whenever prompt text changes (cheap and explicit — no hashing of Catalan strings).
+- **2026-04-22** — Prompt registry over prompt string. Rationale: prompts are looked up by `(strategy, version)` from a module-level `PROMPTS` dict, not passed in by callers. This keeps prompts as a first-class artifact of the codebase (versioned in git, one source of truth), and makes Week 4's "add few-shot variant" a one-line change rather than a refactor.
+- **2026-04-22** — Extractor picked via `MEDITAB_LLM_PROVIDER` env var (default `gemini`). Rationale: keeps every script vendor-neutral; the hospital-day diff becomes an env-var flip plus adding a `BedrockExtractor` class, not a rewrite of the extraction scripts.
+- **2026-04-22** — Retry transient LLM errors in the extractor, not in the caller. Rationale: Day 8's very first live run hit a Gemini 503; Day 9 batch across 10 patients would trip this nearly every run. Retrying at the extractor boundary means batch loops, future eval scripts, and any downstream user of `LLMClient.extract` inherit resilience for free. Retry-on set is narrow (429/500/503) to avoid hiding real bugs behind silent retries.

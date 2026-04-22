@@ -72,7 +72,7 @@ def main(pid: str, repo_root: Path) -> int:
 
     print(f"Extracting {pid}...\n")
     extractor = GeminiExtractor()
-    extracted = extractor.extract(note_ca, pid)
+    extracted = extractor.extract(note_ca, pid, strategy="zero-shot", version="v1")
 
     print("--- Extracted ---")
     print(extracted.model_dump_json(indent=2))

@@ -1,9 +1,12 @@
 """LLM adapter for structured clinical extraction.
 
-The Protocol below is the swap point for the hospital machine: replace
-`GeminiExtractor` with a `BedrockExtractor` (Claude Haiku / Llama / Mistral /
-Nova) and nothing downstream changes — ingestion, MCP, eval all depend on
-the interface, not the vendor.
+The `LLMClient` Protocol is the swap point for the hospital machine: add a
+`BedrockExtractor` alongside `GeminiExtractor` and `make_extractor()` will
+pick one based on `MEDITAB_LLM_PROVIDER`. Nothing downstream (ingestion,
+MCP, eval) depends on the vendor.
+
+Prompts live in the `PROMPTS` registry keyed on (strategy, version). Week 4
+adds few-shot / CoT entries by appending to the dict.
 
 Run anything that calls this with GEMINI_API_KEY set (from .env).
 """
@@ -11,28 +14,28 @@ Run anything that calls this with GEMINI_API_KEY set (from .env).
 from __future__ import annotations
 
 import os
+import time
 from typing import Protocol
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from meditab.schema import PatientExtraction
 
 
-# ------------------------------- interface --------------------------------
+# Transient Gemini errors that are worth retrying. 503 is quota / high demand,
+# 429 is rate limit, 500 is internal error. Permanent errors (400 bad request,
+# 401 auth, 404 model-not-found) must not retry — they won't resolve by waiting.
+_RETRYABLE_STATUS = {429, 500, 503}
+_MAX_RETRIES = 3
+_BASE_BACKOFF_S = 5.0
 
 
-class LLMClient(Protocol):
-    """One method: extract a PatientExtraction from a Catalan clinical note."""
+# -------------------------------- prompts ---------------------------------
 
-    def extract(self, note_ca: str, patient_id: str) -> PatientExtraction: ...
-
-
-# --------------------------------- prompt ---------------------------------
-
-# Zero-shot extraction prompt. Catalan to match the note language (empirically
-# improves terminology accuracy). Rules mirror docs/annotation_schema.md.
-EXTRACTION_PROMPT = """Ets un assistent d'extracció d'informació clínica estructurada per a recerca.
+# Zero-shot Catalan extraction prompt. Rules mirror docs/annotation_schema.md.
+ZERO_SHOT_V1 = """Ets un assistent d'extracció d'informació clínica estructurada per a recerca.
 
 Tasca: donada una nota clínica en català (estil "curs clínic" hospitalari), produeix un objecte JSON amb `patient_id` i una llista `drugs[]` que capturi TOTS els fàrmacs esmentats.
 
@@ -61,6 +64,41 @@ Nota clínica:
 """
 
 
+# Registry keyed on (strategy, version). Week 4 adds few-shot / CoT variants
+# by appending entries here — no extractor changes needed.
+PROMPTS: dict[tuple[str, str], str] = {
+    ("zero-shot", "v1"): ZERO_SHOT_V1,
+}
+
+
+def get_prompt(strategy: str, version: str) -> str:
+    try:
+        return PROMPTS[(strategy, version)]
+    except KeyError:
+        available = sorted(PROMPTS)
+        raise ValueError(
+            f"unknown (strategy, version) = ({strategy!r}, {version!r}); "
+            f"registered: {available}"
+        ) from None
+
+
+# ------------------------------- interface --------------------------------
+
+
+class LLMClient(Protocol):
+    """One method: extract a PatientExtraction from a Catalan clinical note."""
+
+    model_id: str
+
+    def extract(
+        self,
+        note_ca: str,
+        patient_id: str,
+        strategy: str,
+        version: str,
+    ) -> PatientExtraction: ...
+
+
 # ----------------------------- Gemini adapter -----------------------------
 
 DEFAULT_MODEL = "gemini-2.5-flash"
@@ -71,20 +109,64 @@ class GeminiExtractor:
 
     def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 0.1) -> None:
         self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self._model = model
+        self.model_id = model
         self._temperature = temperature
 
-    def extract(self, note_ca: str, patient_id: str) -> PatientExtraction:
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=EXTRACTION_PROMPT.format(note_ca=note_ca, patient_id=patient_id),
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=PatientExtraction,
-                temperature=self._temperature,
-            ),
+    def extract(
+        self,
+        note_ca: str,
+        patient_id: str,
+        strategy: str,
+        version: str,
+    ) -> PatientExtraction:
+        prompt = get_prompt(strategy, version).format(
+            note_ca=note_ca, patient_id=patient_id
         )
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=PatientExtraction,
+            temperature=self._temperature,
+        )
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = self._client.models.generate_content(
+                    model=self.model_id,
+                    contents=prompt,
+                    config=config,
+                )
+                break
+            except genai_errors.APIError as exc:
+                status = getattr(exc, "code", None)
+                if status not in _RETRYABLE_STATUS or attempt == _MAX_RETRIES:
+                    raise
+                backoff = _BASE_BACKOFF_S * attempt
+                print(
+                    f"  gemini {status} — retry {attempt}/{_MAX_RETRIES - 1} "
+                    f"in {backoff:.0f}s"
+                )
+                time.sleep(backoff)
+
         result: PatientExtraction = response.parsed
         # Overwrite in case the LLM hallucinated a different id — we know the truth.
         result.patient_id = patient_id
         return result
+
+
+# -------------------------------- factory ---------------------------------
+
+
+def make_extractor() -> LLMClient:
+    """Pick an LLMClient based on MEDITAB_LLM_PROVIDER env var.
+
+    - "gemini" (default, laptop dev): `GeminiExtractor`.
+    - "bedrock" (hospital): Week 3 will land `BedrockExtractor`.
+    """
+    provider = os.getenv("MEDITAB_LLM_PROVIDER", "gemini")
+    if provider == "gemini":
+        return GeminiExtractor()
+    if provider == "bedrock":
+        raise NotImplementedError(
+            "BedrockExtractor lands in Week 3 at the hospital"
+        )
+    raise ValueError(f"unknown MEDITAB_LLM_PROVIDER={provider!r}")
