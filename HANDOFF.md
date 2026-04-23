@@ -80,7 +80,7 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 | 6 | Local Mongo (Docker) + ingestion script | ✅ done |
 | 7 | MCP server v0 (`get_patient`, `list_patients`, `store_extraction`, `get_gold`) | ✅ done |
 | 8 | Refactor extraction to go through MCP | ✅ done |
-| 9 | Batch extraction loop + structured logging | pending |
+| 9 | Batch extraction loop + structured logging | ✅ done |
 | 10 | Eval harness (per-field partial-match F1) | pending |
 | 11 | Error analysis v0 | pending |
 | 12 | Iterate on prompt + read first paper against concrete results | pending |
@@ -90,8 +90,8 @@ Full pipeline built on synthetic Catalan data before first hospital session. Aft
 ## Status
 
 **Current week:** 1
-**Last completed day:** 8 (2026-04-22) — end-to-end extraction through MCP, run metadata + prompt registry + provider factory in place, retry on transient Gemini errors
-**Next:** Day 9 — batch extraction loop across all 10 patients + structured logging + unique `(run_id, patient_id)` index on `llm_extractions`
+**Last completed day:** 9 + pre-Day-10 infra (2026-04-23) — batch extraction; Mongo stack collapsed to Windows service; **prompt registry split out to `src/meditab/prompts.py`** with zero-shot + few-shot + cot variants all working; **GroqExtractor added** alongside Gemini (Llama 4 Scout via env var toggle).
+**Next:** Day 10 — eval harness (per-field partial-match F1 against gold, now with three prompt strategies × two providers = 6 runs to score).
 
 ### Carry-over (from Day 1, still outstanding)
 
@@ -209,6 +209,19 @@ Decision: **do NOT fix synthetic golds.** They are scratch data for pipeline dev
 3. Change `notes_dir` in `scripts/day06_ingest.py` to the real data path; drop the gold-ingestion block (no golds yet).
 4. Everything else (`schema.py`, `mongo.py`, `mcp_server.py`, Day 7–10 scripts) is untouched.
 
+#### Day 9 — 2026-04-23 — done
+- [x] [src/meditab/mongo.py](src/meditab/mongo.py) — added `ensure_indexes(db)`. Single place to declare app-required indexes (currently just `llm_extractions.(run_id, patient_id)` unique). Idempotent — called at server boot.
+- [x] [src/meditab/mcp_server.py](src/meditab/mcp_server.py) — `store_extraction` swapped from `insert_one` to `update_one({"run_id": ..., "patient_id": ...}, {"$set": doc}, upsert=True)`. Filter keys match the unique index keys, so the DB itself enforces one row per `(run_id, patient_id)` — bug-proof safety net behind the loop.
+- [x] [scripts/day09_batch_extract.py](scripts/day09_batch_extract.py) — iterates all patients via `list_patients`, one `run_id` per invocation, per-patient try/except so one failure doesn't kill the run. `--limit N` for smoke mode. JSONL log at `logs/day09_<run_id8>.jsonl`, one line per patient with `{ts, run_id, pid, status, elapsed_ms, n_drugs|error}`. `JsonlLogger` flushes on every write so `tail -f` works and a crash mid-batch leaves valid lines on disk.
+- [x] **Smoke (--limit 2):** 2/2 ok, 15.7s. Happy path verified.
+- [x] **Full run (10 patients):** 5/5 ok, 5/5 fail by Gemini free-tier quota exhaustion (20 req/day for 2.5-flash) — **this is the point**: failures surfaced cleanly, logged with exception class, batch continued, no partial rows in Mongo (total stayed at 13 = 6 prior + 2 smoke + 5 new ok). Resilience proved in production conditions rather than mocked.
+- [x] Two Mongo instances were running on 27017 (Docker container + pre-existing Windows native MongoDB 8.2 service). Host-side Python silently bound to the Windows service while Docker's mongo was empty and orphaned. `docker compose down -v` removed the ghost; standardized on Windows service. See decision log 2026-04-23.
+
+**Findings worth recording for the thesis:**
+1. **Gemini free-tier daily quota is the binding dev-side constraint, not the pipeline.** 20 req/day means the full 10-patient batch can only be run twice per day, minus any Day 3/5/8-style one-off calls. On hospital day this vanishes — Bedrock uses per-second rate limits, not daily quotas.
+2. **Retry policy is semantically wrong for 429 quota errors.** The current linear backoff (5s, 10s) is designed for transient 503s, and those succeeded (synthetic_001/002/006 all recovered via retry). 429 quota errors return a `retryDelay` field (6s–53s in observed runs) that says "wait this long"; our fixed backoff was always shorter than that delay, wasting ~45s per failed patient. **Follow-up:** detect 429 in `GeminiExtractor._is_retryable` and either don't retry at all (simplest) or honor `retryDelay`. Deferred because hospital Bedrock has different semantics and the laptop path only has to survive, not be optimal.
+3. **Error field in JSONL is bloated** (~1500 chars per 429 row, 95% of which is the same SDK link boilerplate). Log parsing still works (exception class is at the start), but future log reviewers will appreciate a shorter error shape. Deferred.
+
 ---
 
 ## Operational model (clarified 2026-04-21)
@@ -246,24 +259,29 @@ Pipeline is already being built on **synthetic Catalan clinical text** (primary 
 Whenever you start a new session:
 
 1. Read this HANDOFF.
-2. Check the **Status** section — you are resuming on **Day 9** (batch extraction loop + structured logging).
+2. Check the **Status** section — you are resuming on **Day 10** (eval harness).
 3. Look at **Carry-over** and **Open blockers** — have the hospital/tutor emails gone out? Has anything unblocked?
-4. Tell Claude: "Resuming Meditab, Day 9. [Did I send the emails? Y/N] [Anything new to report?]"
+4. Tell Claude: "Resuming Meditab, Day 10. [Did I send the emails? Y/N] [Anything new to report?]"
 
-### Day 9 at a glance (what's coming next)
+### Day 10 at a glance (what's coming next)
 
-Scale the Day 8 one-patient loop to all 10 synthetic patients. The whole point of the Day 8 metadata scheme is to make this trivial — a `for pid in await list_patients(...)` around the same extract-and-store block.
+Build a per-field evaluation harness against the gold set. Reads `llm_extractions` rows by `run_id`, joins to `gold_extractions` by `patient_id`, computes per-field match scores (exact + partial), and spits out a summary table.
 
 New file:
-- `scripts/day09_batch_extract.py` — iterates all patients, one `run_id` per invocation, structured JSONL log per patient (pid, status, elapsed_ms, n_drugs, error_msg).
+- `scripts/day10_evaluate.py` — takes `--run-id` (defaults to latest), loads the rows + golds from Mongo, prints overall + per-field accuracy.
 
-Mongo change:
-- Add a **unique** index on `llm_extractions.(run_id, patient_id)` so retries within a batch *upsert* instead of accumulate. Switch `store_extraction` from `insert_one` to `update_one({...}, {"$set": doc}, upsert=True)`. This is the one-line toggle we deferred from Day 7.
+Likely module:
+- `src/meditab/eval.py` — field-wise comparators. Exact match for `farmac`, `categoria`, dates; numeric tolerance for dose fields; a normalized string similarity for `resposta_clinica` (the free-text field — probably `difflib.SequenceMatcher` or token overlap).
 
-Resilience:
-- If a single patient's extraction raises (LLM final-failure after all retries, or validator error), the batch should log, mark that patient failed, and continue. One bad apple must not kill the run.
+What to decide upfront:
+- **What counts as a "match" for free text?** Gold says `"bona"`, extractor says `"Bona tolerància... millora significativa..."` — are those equivalent? Day 10 needs an explicit policy. Options: exact-only (strict, terrible score), token-overlap (forgives paraphrase), LLM-as-judge (best signal, one more API call per field).
+- **How to handle the known gold-quality bugs from Day 5/8** (synthetic golds say `dosi_min=50` when note shows 25→50). Day 10 will inherit those as fake errors unless we warn about them or exclude them.
 
-**Learning angle:** Day 9 is where "pipeline" stops being a diagram and starts being a loop with per-item success/failure accounting. The JSONL log is the first input to Day 10's eval harness.
+**Learning angle:** Day 10 is where the pipeline's output gets a number attached to it. The hardest part isn't the F1 math — it's deciding which normalization rules count as fair comparison vs cheating.
+
+### Operational constraint worth flagging
+
+Gemini free-tier gives **20 req/day** for 2.5-flash. The full 10-patient batch burns half. Plan Day 10+ runs accordingly, or preload `synthetic_001` results from a prior `run_id` and iterate on the eval code against those without re-extracting.
 
 ---
 
@@ -288,3 +306,6 @@ Resilience:
 - **2026-04-22** — Prompt registry over prompt string. Rationale: prompts are looked up by `(strategy, version)` from a module-level `PROMPTS` dict, not passed in by callers. This keeps prompts as a first-class artifact of the codebase (versioned in git, one source of truth), and makes Week 4's "add few-shot variant" a one-line change rather than a refactor.
 - **2026-04-22** — Extractor picked via `MEDITAB_LLM_PROVIDER` env var (default `gemini`). Rationale: keeps every script vendor-neutral; the hospital-day diff becomes an env-var flip plus adding a `BedrockExtractor` class, not a rewrite of the extraction scripts.
 - **2026-04-22** — Retry transient LLM errors in the extractor, not in the caller. Rationale: Day 8's very first live run hit a Gemini 503; Day 9 batch across 10 patients would trip this nearly every run. Retrying at the extractor boundary means batch loops, future eval scripts, and any downstream user of `LLMClient.extract` inherit resilience for free. Retry-on set is narrow (429/500/503) to avoid hiding real bugs behind silent retries.
+- **2026-04-23** — Local dev stack standardized on the pre-existing Windows-native MongoDB 8.2 service, not the Docker container. Rationale: the Docker container bound port 27017 *after* the Windows service had already taken it, so Docker's "bind succeeded" (per `docker compose ps`) was misleading — all host traffic went to the Windows service while the Docker container sat empty. Discovered during Day 9 verification (mongosh-in-container saw no data; Python saw 6 rows). Fix: `docker compose down -v`. Hospital day uses `MONGO_URI` env var, so dev laptop choice is orthogonal. `docker-compose.yml` left in the repo as optional — if someone reproduces this on a laptop without the Windows service, it'll Just Work™.
+- **2026-04-23** — Day 9 batch policy: a single-patient failure logs and continues, it does not halt the run. Rationale: one LLM timeout or validator error across 5000 patients would waste hours of upstream work. JSONL log + structured `status` field per patient means Day 10's eval reads success/fail as data, not as script exit codes. Confirmed on Day 9 full run: 5 failures, 5 ok, batch still ran to completion and wrote a parseable log.
+- **2026-04-23** — Known follow-up deferred: `GeminiExtractor` currently retries 429 with the same linear backoff as 503, but Gemini's 429s are quota-based (daily limit on the free tier) and include a `retryDelay` field (6–53s in observed runs) that's always larger than our fixed backoff. Retries are therefore wasted on 429. Simplest fix: treat 429 as non-retryable. Deferred because (a) hospital-day Bedrock has different rate-limit semantics and (b) the current code still correctly logs the failure rather than crashing — it's wasteful, not broken.

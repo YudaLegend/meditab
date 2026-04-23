@@ -26,10 +26,14 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from meditab.mongo import get_db
+from meditab.mongo import ensure_indexes, get_db
 from meditab.schema import PatientExtraction
 
 mcp = FastMCP("meditab")
+
+# Declare indexes once at server boot. Idempotent, so re-spawning the server
+# (every MCP client session spawns a fresh subprocess) is cheap.
+ensure_indexes()
 
 
 # ------------------------------ read tools -------------------------------
@@ -108,9 +112,10 @@ def store_extraction(
         prompt_version  — bumped whenever the prompt text changes
         run_id          — groups all patient rows from one batch execution
 
-    Across different run_ids full history is preserved. Day 9 will add a
-    unique index on (run_id, patient_id) and switch this to an upsert so
-    retries within a batch overwrite instead of accumulate.
+    Across different run_ids full history is preserved. Within a single
+    run_id, the unique index on (run_id, patient_id) + upsert below means
+    a retry for the same patient overwrites the previous row instead of
+    accumulating duplicates.
 
     Returns an ack: {"ok", "patient_id", "model", "run_id", "run_at"}.
     """
@@ -127,7 +132,16 @@ def store_extraction(
         "run_at": run_at,
         "extraction": validated.model_dump(mode="json"),
     }
-    db["llm_extractions"].insert_one(doc)
+    # TODO(day9): replace insert_one with update_one upsert.
+    #   The filter MUST use the same keys as the unique index declared in
+    #   mongo.ensure_indexes() — otherwise Mongo rejects the second call
+    #   for the same (run_id, patient_id) instead of overwriting it.
+    #
+    db["llm_extractions"].update_one(
+        {"run_id": run_id, "patient_id": patient_id},
+        {"$set": doc},
+        upsert=True,
+    )
     return {
         "ok": True,
         "patient_id": patient_id,

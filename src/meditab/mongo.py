@@ -28,3 +28,22 @@ def get_client() -> MongoClient:
 
 def get_db(client: MongoClient | None = None) -> Database:
     return (client or get_client())[DB_NAME]
+
+
+def ensure_indexes(db: Database | None = None) -> None:
+    """Declare every index the app depends on. Idempotent — safe to call on
+    every server boot. One place to look when ops asks 'what indexes does
+    meditab need?'.
+
+    Index inventory:
+        llm_extractions: unique on (run_id, patient_id) — makes Day 9 batch
+        retries idempotent (same key → upsert overwrites; no accumulation).
+    """
+    db = db or get_db()
+    # TODO(day9):
+    db["llm_extractions"].create_index(
+        [("run_id", 1), ("patient_id", 1)],
+        unique=True,
+        name="uniq_run_patient",
+    )
+
