@@ -1,16 +1,14 @@
-"""Day 7: MCP smoke test — spawns the server over stdio and calls each tool.
+"""MCP smoke test — spawns the server over stdio and calls each tool.
 
-This is our Pattern B proof: the server is a plain subprocess, the client
-is plain Python, and there is no LLM in the loop. If this script prints
-"ALL TOOLS OK" at the end, the MCP surface is ready for Day 8 (refactor
-extraction to go through MCP).
+Pattern B proof: the server is a plain subprocess, the client is plain
+Python, and there is no LLM in the loop. If this script prints
+"ALL TOOLS OK" at the end, the MCP surface is healthy.
 
 Prereq:
-    docker compose up -d          # Mongo must be live
-    uv run python scripts/day06_ingest.py   # only if collections are empty
+    uv run python scripts/ingest.py   # only if collections are empty
 
 Usage:
-    uv run python scripts/day07_mcp_smoke.py
+    uv run python scripts/smoke_mcp.py
 """
 
 from __future__ import annotations

@@ -194,3 +194,61 @@ def render_prompt(
         .replace("{note_ca}", note_ca)
         .replace("{patient_id}", patient_id)
     )
+
+
+# ----------------------------- judge prompts ------------------------------
+
+# LLM-as-judge prompt. Used by `meditab.judge` to compare gold text to
+# extracted text for free-text fields (resposta_clinica, motiu_discontinuacio).
+# The judge is deliberately conservative: "partial" exists so minor
+# differences in scope (gold mentions AE, extracted doesn't) register as a
+# warning rather than a binary fail.
+JUDGE_CLINICAL_V1 = """Ets un revisor clínic expert. La teva tasca és decidir si dos textos descriuen la mateixa informació clínica per al camp {field_name}.
+
+Text de referència (gold, escrit per un clínic):
+---
+{gold_text}
+---
+
+Text extret automàticament per un LLM:
+---
+{extracted_text}
+---
+
+Criteris:
+- "yes" — tots dos textos comuniquen la mateixa informació clínica essencial. Parafrasejar, ampliar amb detalls coherents o resumir NO compta com a error.
+- "partial" — coincideixen en la idea principal però un dels dos omet o afegeix informació clínicament rellevant (ex: el gold menciona un efecte advers que l'extret no).
+- "no" — descriuen situacions clíniques diferents o una de les dues no s'ajusta al camp {field_name}.
+
+Respon ÚNICAMENT amb un JSON d'aquesta forma:
+{"verdict": "yes | partial | no", "rationale": "una frase curta en català explicant per què"}"""
+
+
+JUDGE_PROMPTS: dict[tuple[str, str], str] = {
+    ("judge-clinical", "v1"): JUDGE_CLINICAL_V1,
+}
+
+
+def render_judge_prompt(
+    field_name: str,
+    gold_text: str,
+    extracted_text: str,
+    *,
+    strategy: str = "judge-clinical",
+    version: str = "v1",
+) -> str:
+    """Return the fully-rendered judge prompt."""
+    try:
+        template = JUDGE_PROMPTS[(strategy, version)]
+    except KeyError:
+        available = sorted(JUDGE_PROMPTS)
+        raise ValueError(
+            f"unknown judge (strategy, version) = ({strategy!r}, {version!r}); "
+            f"registered: {available}"
+        ) from None
+    return (
+        template
+        .replace("{field_name}", field_name)
+        .replace("{gold_text}", gold_text)
+        .replace("{extracted_text}", extracted_text)
+    )

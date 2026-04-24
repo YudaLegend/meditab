@@ -66,10 +66,10 @@ class GeminiExtractor:
     against PatientExtraction before parse."""
 
     def __init__(
-        self, model: str = GEMINI_DEFAULT_MODEL, temperature: float = 0.1
+        self, model: str | None = None, temperature: float = 0.1
     ) -> None:
         self._client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        self.model_id = model
+        self.model_id = model or os.getenv("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
         self._temperature = temperature
 
     def extract(

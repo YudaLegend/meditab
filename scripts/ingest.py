@@ -1,14 +1,14 @@
-"""Day 6: ingest synthetic notes + golds into MongoDB.
+"""Ingest notes + golds into MongoDB.
 
 Idempotent: re-running upserts by `_id = patient_id`, so no duplicates.
 Validates every gold JSON through PatientExtraction on the way in, so a
 drifted gold would fail here rather than silently rotting in Mongo.
 
-Prereq: `docker compose up -d` in the repo root.
+Prereq: Mongo reachable at MONGO_URI (default localhost:27017).
 
 Usage:
-    uv run python scripts/day06_ingest.py
-    uv run python scripts/day06_ingest.py --dry-run
+    uv run python scripts/ingest.py
+    uv run python scripts/ingest.py --dry-run
 """
 
 import argparse

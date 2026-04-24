@@ -2,7 +2,7 @@
 
 This is the Pattern B surface (see HANDOFF "Operational model"): the server
 doesn't know or care who is calling it. Day 7 wires up a plain Python client
-(`scripts/day07_mcp_smoke.py`). A future Pattern A layer (LLM as agent) would
+(`scripts/smoke_mcp.py`). A future Pattern A layer (LLM as agent) would
 connect to the same tools without any change here.
 
 Tools:

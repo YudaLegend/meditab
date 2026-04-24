@@ -1,22 +1,23 @@
-"""Day 9: batch extraction across every patient in raw_notes.
+"""Batch extraction across every patient in raw_notes.
 
-Scales Day 8's one-patient flow to all patients, all through MCP. Every
-invocation gets a fresh run_id; all rows written by this invocation share
-that run_id in llm_extractions. Day 10's eval will filter by run_id.
+Scales extract_one.py to all patients, all through MCP. Every invocation
+gets a fresh run_id; every row written by this invocation shares that
+run_id in llm_extractions. evaluate.py filters by run_id.
 
-Design calls (see HANDOFF Day 9 at-a-glance):
+Design calls:
   - One run_id per invocation (not per patient).
   - Per-patient try/except — one bad apple does not kill the batch.
-  - Structured JSONL log at logs/day09_<run_id8>.jsonl, one line per patient.
+  - Structured JSONL log at logs/batch_<run_id8>.jsonl, one line per patient.
   - MCP session is opened once; all patients share it.
 
 Prereq:
-    (Windows Mongo service running on localhost:27017)
-    uv run python scripts/day06_ingest.py   # if collections are empty
+    uv run python scripts/ingest.py   # if collections are empty
 
 Usage:
-    uv run python scripts/day09_batch_extract.py
-    uv run python scripts/day09_batch_extract.py --limit 3      # smoke
+    uv run python scripts/extract_batch.py
+    uv run python scripts/extract_batch.py --limit 3      # smoke
+    uv run python scripts/extract_batch.py --strategy few-shot --version v1
+    MEDITAB_LLM_PROVIDER=groq uv run python scripts/extract_batch.py
 """
 
 from __future__ import annotations
@@ -46,8 +47,8 @@ SERVER_PARAMS = StdioServerParameters(
     args=["run", "python", "-m", "meditab.mcp_server"],
 )
 
-PROMPT_STRATEGY = "zero-shot"
-PROMPT_VERSION = "v1"
+DEFAULT_STRATEGY = "zero-shot"
+DEFAULT_VERSION = "v1"
 
 LOG_DIR = Path("logs")
 
@@ -99,6 +100,8 @@ async def extract_one(
     *,
     extractor,
     run_id: str,
+    strategy: str,
+    version: str,
 ) -> dict[str, Any]:
     """Run the full extract-and-store cycle for one patient.
 
@@ -116,7 +119,7 @@ async def extract_one(
         note_ca = _unwrap_text(result)
 
         extracted = extractor.extract(
-            note_ca, pid, strategy=PROMPT_STRATEGY, version=PROMPT_VERSION
+            note_ca, pid, strategy=strategy, version=version
         )
 
         await session.call_tool(
@@ -124,8 +127,8 @@ async def extract_one(
             {
                 "patient_id": pid,
                 "model": extractor.model_id,
-                "prompt_strategy": PROMPT_STRATEGY,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_strategy": strategy,
+                "prompt_version": version,
                 "run_id": run_id,
                 "extraction": extracted.model_dump(mode="json"),
             },
@@ -149,15 +152,15 @@ async def extract_one(
 # ---------------------------------- main -----------------------------------
 
 
-async def run_batch(limit: int | None) -> int:
+async def run_batch(limit: int | None, strategy: str, version: str) -> int:
     extractor = make_extractor()
     run_id = uuid.uuid4().hex
-    log_path = LOG_DIR / f"day09_{run_id[:8]}.jsonl"
+    log_path = LOG_DIR / f"batch_{run_id[:8]}.jsonl"
     logger = JsonlLogger(log_path)
 
     print(
         f"run_id={run_id[:8]}...  model={extractor.model_id}  "
-        f"strategy={PROMPT_STRATEGY}/{PROMPT_VERSION}"
+        f"strategy={strategy}/{version}"
     )
     print(f"log: {log_path}")
 
@@ -178,7 +181,12 @@ async def run_batch(limit: int | None) -> int:
 
             for i, pid in enumerate(patients, 1):
                 row = await extract_one(
-                    session, pid, extractor=extractor, run_id=run_id
+                    session,
+                    pid,
+                    extractor=extractor,
+                    run_id=run_id,
+                    strategy=strategy,
+                    version=version,
                 )
                 # Every row gets ts + run_id added here so extract_one
                 # doesn't have to remember.
@@ -215,5 +223,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None,
                         help="Process only the first N patients (smoke mode).")
+    parser.add_argument("--strategy", default=DEFAULT_STRATEGY,
+                        help="Prompt strategy registered in meditab.prompts "
+                             "(e.g. 'zero-shot', 'few-shot', 'cot').")
+    parser.add_argument("--version", default=DEFAULT_VERSION,
+                        help="Prompt version (e.g. 'v1').")
     args = parser.parse_args()
-    sys.exit(asyncio.run(run_batch(args.limit)))
+    sys.exit(asyncio.run(run_batch(args.limit, args.strategy, args.version)))

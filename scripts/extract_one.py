@@ -1,20 +1,21 @@
-"""Day 8: end-to-end extraction through MCP.
+"""Single-patient extraction through MCP.
 
-First real use of Pattern B. The data path has *no disk I/O*:
+Pattern B — no disk I/O in the data path:
     get_patient(pid)   → Catalan note
     extractor.extract  → PatientExtraction
     store_extraction   → writes to llm_extractions (tagged with run metadata)
-    get_gold(pid)      → gold for the diff
+    get_gold(pid)      → gold for the diff (skipped if absent)
 
-If this runs green on one patient, Day 9's batch loop is trivial.
+Use this script to debug a single patient. For the full batch, run extract_batch.py.
 
 Prereq:
-    docker compose up -d
-    uv run python scripts/day06_ingest.py   # if collections are empty
+    uv run python scripts/ingest.py   # if collections are empty
 
 Usage:
-    uv run python scripts/day08_mcp_extract.py
-    uv run python scripts/day08_mcp_extract.py --pid synthetic_004
+    uv run python scripts/extract_one.py
+    uv run python scripts/extract_one.py --pid synthetic_004
+    uv run python scripts/extract_one.py --strategy few-shot --version v1
+    MEDITAB_LLM_PROVIDER=groq uv run python scripts/extract_one.py
 """
 
 from __future__ import annotations
@@ -41,9 +42,8 @@ SERVER_PARAMS = StdioServerParameters(
     args=["run", "python", "-m", "meditab.mcp_server"],
 )
 
-# Fixed run config for Day 8 — Week 4 will vary these.
-PROMPT_STRATEGY = "zero-shot"
-PROMPT_VERSION = "v1"
+DEFAULT_STRATEGY = "zero-shot"
+DEFAULT_VERSION = "v1"
 
 
 # --------------------------- MCP result helpers ---------------------------
@@ -91,12 +91,12 @@ def diff_extraction(
 # --------------------------------- main -----------------------------------
 
 
-async def run_extraction(pid: str) -> int:
-    extractor = make_extractor()  # laptop: Gemini; hospital: Bedrock (Week 3)
+async def run_extraction(pid: str, strategy: str, version: str) -> int:
+    extractor = make_extractor()  # laptop: Gemini/Groq; hospital: Bedrock (Week 3)
     run_id = uuid.uuid4().hex
     print(
         f"run_id={run_id[:8]}...  model={extractor.model_id}  "
-        f"strategy={PROMPT_STRATEGY}/{PROMPT_VERSION}"
+        f"strategy={strategy}/{version}"
     )
 
     async with stdio_client(SERVER_PARAMS) as (read, write):
@@ -123,7 +123,7 @@ async def run_extraction(pid: str) -> int:
             # --- 3. run the LLM ---
             print("\nExtracting...")
             extracted = extractor.extract(
-                note_ca, pid, strategy=PROMPT_STRATEGY, version=PROMPT_VERSION
+                note_ca, pid, strategy=strategy, version=version
             )
 
             # --- 4. persist the extraction via MCP ---
@@ -132,8 +132,8 @@ async def run_extraction(pid: str) -> int:
                 {
                     "patient_id": pid,
                     "model": extractor.model_id,
-                    "prompt_strategy": PROMPT_STRATEGY,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_strategy": strategy,
+                    "prompt_version": version,
                     "run_id": run_id,
                     "extraction": extracted.model_dump(mode="json"),
                 },
@@ -164,6 +164,11 @@ async def run_extraction(pid: str) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid", default="synthetic_001")
+    parser.add_argument("--strategy", default=DEFAULT_STRATEGY,
+                        help="Prompt strategy registered in meditab.prompts "
+                             "(e.g. 'zero-shot', 'few-shot', 'cot').")
+    parser.add_argument("--version", default=DEFAULT_VERSION,
+                        help="Prompt version (e.g. 'v1').")
     args = parser.parse_args()
 
-    sys.exit(asyncio.run(run_extraction(args.pid)))
+    sys.exit(asyncio.run(run_extraction(args.pid, args.strategy, args.version)))

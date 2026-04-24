@@ -6,8 +6,8 @@ Day 3 generator happened to produce — study them, they're the real value of
 this exercise.
 
 Usage:
-    uv run python scripts/day04_validate_golds.py
-    uv run python scripts/day04_validate_golds.py --verbose   # full error trees
+    uv run python scripts/validate_golds.py
+    uv run python scripts/validate_golds.py --verbose   # full error trees
 """
 
 import argparse
