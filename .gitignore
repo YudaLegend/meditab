@@ -222,3 +222,6 @@ extractions/
 
 # Notebooks output (can leak data)
 *.ipynb_checkpoints/
+
+
+thesis/literature/
