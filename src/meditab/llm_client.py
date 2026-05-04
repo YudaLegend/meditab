@@ -66,9 +66,9 @@ class OllamaExtractor:
     Endpoint defaults to http://localhost:11434/v1; override via OLLAMA_BASE_URL.
     """
     def __init__(self) -> None:
-        self.model_id = os.getenv("OLLAMA_MODEL", "gemma3:4b")    # ← model_id, no model
+        self.model_id = os.getenv("OLLAMA_MODEL", "qwen3:4b")    # ← model_id, no model
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        self._client = OpenAI(base_url=base_url, api_key="ollama")
+        self._client = OpenAI(base_url=base_url, api_key="ollama", timeout=600.0)
 
     def extract(
         self,
@@ -83,7 +83,7 @@ class OllamaExtractor:
         resp = self._client.chat.completions.create(
             model=self.model_id,
             messages=[
-                {"role": "system", "content": "You are a clinical information extractor. Reply ONLY with valid JSON matching the schema."},
+                {"role": "system", "content": "You are a clinical information extractor. Reply ONLY with valid JSON matching the schema." "/no_think"},
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
