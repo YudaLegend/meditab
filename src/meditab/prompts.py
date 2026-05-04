@@ -5,8 +5,13 @@ One file, one module — the thesis methodology chapter will cite specific
 
 Currently registered:
     ("zero-shot", "v1")  — baseline rules-only prompt (Days 5–9).
-    ("few-shot", "v1")   — same rules + 3 in-context examples loaded from
-                           raw_notes + gold_extractions.
+    ("few-shot", "v1")   — same rules + ONE inlined synthetic example
+                           covering the rule edge cases the model most
+                           often gets wrong (dose escalation, brand→generic,
+                           AE persistence, is_ongoing invariants).
+                           Inlined (not Mongo-loaded) so the example is
+                           version-controlled and the thesis can cite it
+                           verbatim without a DB dump.
     ("cot",       "v1")  — same rules + explicit "raona pas a pas"
                            instruction. Note: when paired with a provider
                            that enforces structured output at the model
@@ -28,11 +33,7 @@ sent. Always add ("strategy", "v2") and leave v1 intact for auditability.
 
 from __future__ import annotations
 
-import json
-from functools import lru_cache
 from typing import Callable
-
-from meditab.mongo import get_db
 
 
 # --------------------------- shared rule body -----------------------------
@@ -98,62 +99,100 @@ Només després d'aquest raonament, emet el JSON.
 
 # ----------------------------- few-shot v1 --------------------------------
 
-# Which patients are used as few-shot examples. These are "held out" of any
-# eval set — same IDs chosen in the eval plan's few-shot pool. Covers three
-# distinct shapes: simple mono (001), multi-drug (003), AE-heavy discontin-
-# uation (007). Change this tuple = new prompt version.
-_FEW_SHOT_V1_EXAMPLE_IDS: tuple[str, ...] = (
-    "synthetic_001",
-    "synthetic_003",
-    "synthetic_007",
-)
+# Single inlined synthetic example. NOT a real patient — fully fabricated.
+# Designed to exercise the rules the model most frequently violates:
+#   - Rule 2 (brand→generic):     "Prozac" → "fluoxetina"
+#   - Rule 4 (dose escalation):   20 → 40 mg/dia captured as min/max
+#   - Rule 5 (ISO dates):         all YYYY-MM-DD
+#   - Rule 6 (is_ongoing=true):   data_fi/motiu/durada all null
+#   - Rule 7 (durada_mesos):      computed when both dates present, null otherwise
+#   - Rule 9 + AE schema:         structured AdverseEffect objects with persistent + severitat
+#   - resposta_clinica:           real summary, not "bona"
+#   - motiu_discontinuacio:       non-AE reason (patient preference)
+#
+# Inlined rather than Mongo-loaded so:
+#   1. The exact prompt text is version-controlled.
+#   2. The thesis methodology chapter can quote it directly.
+#   3. No DB round-trip or cache-staleness class of bug.
+_FEW_SHOT_V1_EXAMPLE = """### Exemple — patient_id: example_01
 
-_FEW_SHOT_V1_TEMPLATE = f"""Ets un assistent d'extracció d'informació clínica estructurada per a recerca.
+Nota:
+---
+Curs clínic — pacient dona de 47 anys. Antecedents: trastorn d'ansietat generalitzada, sense al·lèrgies medicamentoses conegudes.
+
+Visita 12/02/2024: clínica ansiosa-depressiva moderada de 6 mesos d'evolució amb hipovitalitat, anhedonia i insomni de manteniment. S'inicia Prozac 20 mg/dia. S'adverteix la pacient sobre possibles efectes adversos gastrointestinals durant les primeres setmanes.
+
+Visita 14/03/2024: refereix nàusees lleus durant la primera setmana, ja resoltes (no persistents). Resposta inicial parcial. Es decideix escalar Prozac a 40 mg/dia.
+
+Visita 25/04/2024: millora clara de l'estat d'ànim i del son. Es manté Prozac 40 mg/dia. Sense nous efectes adversos.
+
+Visita 10/06/2024: persisteix component ansiós residual amb dificultat per conciliar el son. S'afegeix Lormetazepam 1 mg/nit.
+
+Visita 22/07/2024: bona resposta combinada. La pacient refereix sequedat de boca persistent atribuïble al Lormetazepam, lleu i tolerada. Es manté pauta.
+
+Visita 15/09/2024: Lormetazepam suspès per voluntat de la pacient (preferia evitar tractament hipnòtic crònic) — resolució completa de la sequedat de boca als 7 dies. Es manté Prozac 40 mg/dia amb estabilitat clínica. Tractament en curs.
+---
+
+JSON esperat:
+{
+  "patient_id": "example_01",
+  "drugs": [
+    {
+      "farmac": "fluoxetina",
+      "categoria": "Antidepressiu (ISRS)",
+      "dosi_min_mg_dia": 20.0,
+      "dosi_max_mg_dia": 40.0,
+      "dosi_notes": null,
+      "data_inici": "2024-02-12",
+      "data_fi": null,
+      "is_ongoing": true,
+      "durada_mesos": null,
+      "resposta_clinica": "Resposta inicial parcial al març amb millora clara de l'estat d'ànim i del son a partir d'abril. Estabilitat clínica mantinguda al setembre amb 40 mg/dia.",
+      "efectes_adversos": [
+        {
+          "descripcio": "nàusees",
+          "persistent": "no persistent",
+          "severitat": "lleu"
+        }
+      ],
+      "motiu_discontinuacio": null
+    },
+    {
+      "farmac": "lormetazepam",
+      "categoria": "Hipnòtic (benzodiazepina)",
+      "dosi_min_mg_dia": 1.0,
+      "dosi_max_mg_dia": 1.0,
+      "dosi_notes": null,
+      "data_inici": "2024-06-10",
+      "data_fi": "2024-09-15",
+      "is_ongoing": false,
+      "durada_mesos": 3,
+      "resposta_clinica": "Millora del component ansiós residual i del son en associació amb fluoxetina. Tolerància general bona durant els tres mesos.",
+      "efectes_adversos": [
+        {
+          "descripcio": "sequedat de boca",
+          "persistent": "persistent",
+          "severitat": "lleu"
+        }
+      ],
+      "motiu_discontinuacio": "voluntat de la pacient (evitar tractament hipnòtic crònic)"
+    }
+  ]
+}
+"""
+
+FEW_SHOT_V1 = f"""Ets un assistent d'extracció d'informació clínica estructurada per a recerca.
 
 Tasca: donada una nota clínica en català (estil "curs clínic" hospitalari), produeix un objecte JSON amb `patient_id` i una llista `drugs[]` que capturi TOTS els fàrmacs esmentats.
 
 {_BASE_RULES}
-Aquí tens alguns exemples de referència (nota + JSON esperat). Aplica el mateix format a la nota nova.
+Aquí tens un exemple de referència (nota + JSON esperat). Aplica el mateix format a la nota nova.
 
-__EXAMPLES__
+{_FEW_SHOT_V1_EXAMPLE}
 
 Ara aplica el mateix format a la següent nota:
 
 {_NOTE_BLOCK}"""
-
-
-def _render_example(i: int, pid: str, note_ca: str, gold: dict) -> str:
-    gold_json = json.dumps(gold, ensure_ascii=False, indent=2, default=str)
-    return (
-        f"### Exemple {i} — patient_id: {pid}\n\n"
-        f"Nota:\n---\n{note_ca}\n---\n\n"
-        f"JSON esperat:\n{gold_json}\n"
-    )
-
-
-@lru_cache(maxsize=1)
-def _few_shot_v1_prompt() -> str:
-    """Load the 3 example patients from Mongo and inline them into the template.
-
-    Cached: the examples don't change between calls within a process, and
-    Mongo round-trips would otherwise happen once per extraction. Cache is
-    process-local, so a new run_id always re-reads from Mongo at first use.
-    """
-    db = get_db()
-    pieces: list[str] = []
-    for i, pid in enumerate(_FEW_SHOT_V1_EXAMPLE_IDS, 1):
-        note_doc = db.raw_notes.find_one({"_id": pid})
-        gold_doc = db.gold_extractions.find_one({"_id": pid})
-        if note_doc is None or gold_doc is None:
-            raise RuntimeError(
-                f"few-shot example {pid!r} not in Mongo — run Day 6 ingest first"
-            )
-        for f in ("_id", "source_path", "ingested_at"):
-            gold_doc.pop(f, None)
-        pieces.append(_render_example(i, pid, note_doc["text_ca"], gold_doc))
-    examples_block = "\n".join(pieces)
-    # Use replace(), not format(), because examples contain literal braces.
-    return _FEW_SHOT_V1_TEMPLATE.replace("__EXAMPLES__", examples_block)
 
 
 # ------------------------------- registry ---------------------------------
@@ -164,7 +203,7 @@ def _few_shot_v1_prompt() -> str:
 PROMPTS: dict[tuple[str, str], Callable[[], str]] = {
     ("zero-shot", "v1"): lambda: ZERO_SHOT_V1,
     ("cot", "v1"): lambda: COT_V1,
-    ("few-shot", "v1"): _few_shot_v1_prompt,
+    ("few-shot", "v1"): lambda: FEW_SHOT_V1,
 }
 
 
